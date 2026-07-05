@@ -1,3 +1,4 @@
+import os
 import cv2
 import mediapipe as mp
 import math
@@ -437,15 +438,44 @@ with st.sidebar:
     smooth = st.slider("smoothness 🌊", 0.0, 1.0, 0.3)
     high = st.slider("sensitivity 🤏", 0.5, 3.0, 1.45)
 
+def _cred(name):
+    """Read a credential from the environment or Streamlit secrets."""
+    val = os.environ.get(name)
+    if val:
+        return val
+    try:
+        return st.secrets[name]
+    except Exception:
+        return None
+
+
+# Cache the Twilio TURN token (Twilio's default TTL is 24h; refetch hourly).
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_ice_servers():
+    """ICE servers for the WebRTC connection.
+
+    Uses Twilio's TURN relay when credentials are set (required on hosted
+    deployments behind NAT, e.g. Hugging Face Spaces); otherwise falls back to a
+    public STUN server, which is enough for local runs.
+    """
+    stun_only = [{"urls": ["stun:stun.l.google.com:19302"]}]
+    account_sid = _cred("TWILIO_ACCOUNT_SID")
+    auth_token = _cred("TWILIO_AUTH_TOKEN")
+    if not account_sid or not auth_token:
+        return stun_only
+    try:
+        from twilio.rest import Client
+        token = Client(account_sid, auth_token).tokens.create()
+        return token.ice_servers
+    except Exception as e:  # network error, bad creds, etc. — degrade gracefully
+        st.warning(f"Couldn't fetch Twilio TURN servers; using STUN only ({e}).")
+        return stun_only
+
+
 ctx = webrtc_streamer(
     key="flower",
     video_processor_factory=FlowerProcessor,
-    rtc_configuration={
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {"urls": ["stun:stun1.l.google.com:19302"]},
-        ]
-    },
+    rtc_configuration={"iceServers": get_ice_servers()},
     media_stream_constraints={
         "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}},
         "audio": False,
