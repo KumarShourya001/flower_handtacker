@@ -440,6 +440,12 @@ with st.sidebar:
 ctx = webrtc_streamer(
     key="flower",
     video_processor_factory=FlowerProcessor,
+    rtc_configuration={
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {"urls": ["stun:stun1.l.google.com:19302"]},
+        ]
+    },
     media_stream_constraints={
         "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}},
         "audio": False,
