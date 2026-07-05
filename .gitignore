@@ -21,3 +21,6 @@ Thumbs.db
 # Streamlit
 .streamlit/secrets.toml
 .hf_token
+
+# stray clone of the Space
+hand-flower/
