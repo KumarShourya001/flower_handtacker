@@ -235,6 +235,19 @@ st.markdown(
     }
 
     #MainMenu, footer { visibility: hidden; }
+
+    /* phone-friendly sizing */
+    @media (max-width: 640px) {
+        .block-container { padding-top: 0.6rem; }
+        .bloom-title { font-size: 2.1rem; }
+        .bloom-sub { font-size: 0.95rem; }
+        .bloom-card { padding: 0.8rem 0.9rem; border-radius: 20px; }
+        .chips { gap: 0.6rem; }
+        .chip { flex: 1 1 100%; padding: 0.6rem 0.8rem; }
+        .chip .big { font-size: 1.5rem; }
+        .hint { font-size: 0.85rem; }
+        .stApp iframe { border-radius: 18px; }
+    }
     </style>
     """,
     unsafe_allow_html=True,
@@ -350,13 +363,20 @@ ctx = webrtc_streamer(
     server_rtc_configuration={"iceServers": ice_servers},
     frontend_rtc_configuration={"iceServers": ice_servers},
     media_stream_constraints={
-        "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}},
+        # facingMode "user" opens the front/selfie camera on phones, which suits
+        # a hand-mirror app (the feed is mirror-flipped in recv).
+        "video": {
+            "facingMode": "user",
+            "width": {"ideal": 1280},
+            "height": {"ideal": 720},
+        },
         "audio": False,
     },
     video_html_attrs=VideoHTMLAttributes(
         autoPlay=True,
         controls=False,
         muted=True,
+        playsInline=True,  # iOS Safari: play inline instead of forcing fullscreen
         style={
             "width": "100%",
             "borderRadius": "26px",
