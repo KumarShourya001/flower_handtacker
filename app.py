@@ -472,10 +472,35 @@ def get_ice_servers():
         return stun_only
 
 
+ice_servers = get_ice_servers()
+
+
+def _ice_urls(servers):
+    urls = []
+    for s in servers:
+        u = s.get("urls") or s.get("url")
+        urls.extend(u if isinstance(u, list) else [u])
+    return urls
+
+
+with st.sidebar.expander("🔧 connection debug"):
+    _urls = _ice_urls(ice_servers)
+    _turn = any("turn:" in (u or "") for u in _urls)
+    st.write(f"SID set: **{bool(_cred('TWILIO_ACCOUNT_SID'))}**")
+    st.write(f"Token set: **{bool(_cred('TWILIO_AUTH_TOKEN'))}**")
+    st.write(f"TURN relay active: **{_turn}**")
+    st.caption("URLs (secrets hidden):")
+    st.code("\n".join(u for u in _urls if u) or "(none)")
+
+# Both peers sit behind NAT on hosted deployments (Hugging Face Spaces), so the
+# TURN relay must be configured for the server AND the browser — configuring only
+# one side leaves the other offering unreachable candidates and the connection
+# never completes.
 ctx = webrtc_streamer(
     key="flower",
     video_processor_factory=FlowerProcessor,
-    rtc_configuration={"iceServers": get_ice_servers()},
+    server_rtc_configuration={"iceServers": ice_servers},
+    frontend_rtc_configuration={"iceServers": ice_servers},
     media_stream_constraints={
         "video": {"width": {"ideal": 1280}, "height": {"ideal": 720}},
         "audio": False,
