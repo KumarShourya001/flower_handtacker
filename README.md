@@ -11,6 +11,10 @@ pinned: false
 
 # 🌸 Bloom for You
 
+### 🌐 Live demo → **[Try it on Hugging Face Spaces](https://huggingface.co/spaces/KrShourya/hand-flower)**
+
+[![Open in Spaces](https://huggingface.co/datasets/huggingface/badges/resolve/main/open-in-hf-spaces-md.svg)](https://huggingface.co/spaces/KrShourya/hand-flower)
+
 A hand-controlled flower that grows and blooms as you move your hands, built with
 Streamlit, MediaPipe hand tracking and streamlit-webrtc.
 
