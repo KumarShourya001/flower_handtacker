@@ -143,6 +143,20 @@ st.markdown(
         padding: 0 0.4rem;
     }
     @keyframes shine { to { background-position: 200% center; } }
+    .bloom-hb {
+        text-align: center;
+        font-family: 'Pacifico', cursive;
+        font-size: 2rem;
+        margin: 0.3rem 0 0.1rem 0;
+        background: linear-gradient(90deg, #ff5fa2, #ffb347, #c77dff, #ff5fa2);
+        background-size: 200% auto;
+        -webkit-background-clip: text;
+        background-clip: text;
+        color: transparent;
+        animation: shine 5s linear infinite, hbpop 2.4s ease-in-out infinite;
+        letter-spacing: 0.02em;
+    }
+    @keyframes hbpop { 0%, 100% { transform: scale(1); } 50% { transform: scale(1.06); } }
     .bloom-sub {
         text-align: center;
         font-size: 1.12rem;
@@ -240,6 +254,7 @@ st.markdown(
     @media (max-width: 640px) {
         .block-container { padding-top: 0.6rem; }
         .bloom-title { font-size: 2.1rem; }
+        .bloom-hb { font-size: 1.4rem; }
         .bloom-sub { font-size: 0.95rem; }
         .bloom-card { padding: 0.8rem 0.9rem; border-radius: 20px; }
         .chips { gap: 0.6rem; }
@@ -265,6 +280,10 @@ st.markdown(_floaters, unsafe_allow_html=True)
 
 st.markdown(
     '<div class="bloom-title">🌸 <span class="t-grad">Bloom for You</span> 🌸</div>',
+    unsafe_allow_html=True,
+)
+st.markdown(
+    '<div class="bloom-hb">🎂 Happy Birthday 🎉</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
