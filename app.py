@@ -14,7 +14,8 @@ HandLandmarker = mp.tasks.vision.HandLandmarker
 HandLandmarkerOptions = mp.tasks.vision.HandLandmarkerOptions
 VisionRunningMode = mp.tasks.vision.RunningMode
 
-
+FaceLandmarker = mp.tasks.vision.FaceLandmarker
+FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
 def pinch_value(hand, high):
     thumb = hand[4]
     index = hand[8]
@@ -29,6 +30,29 @@ def pinch_value(hand, high):
     normalized = max(0.0, min(1.0, normalized))
     return normalized
 
+def overlay_png(bg, png, cx, cy, width, angle_deg):
+    oh, ow = png.shape[:2]
+    scale = width / ow
+    img = cv2.resize(png, (max(1, int(ow*scale)), max(1, int(oh*scale))),
+                     interpolation=cv2.INTER_AREA)
+    nh, nw = img.shape[:2]
+    M = cv2.getRotationMatrix2D((nw/2, nh/2), -angle_deg, 1.0)
+    cos, sin = abs(M[0,0]), abs(M[0,1])
+    bw, bh = int(nh*sin + nw*cos), int(nh*cos + nw*sin)
+    M[0,2] += bw/2 - nw/2
+    M[1,2] += bh/2 - nh/2
+    img = cv2.warpAffine(img, M, (bw, bh), flags=cv2.INTER_LINEAR,
+                         borderValue=(0,0,0,0))
+    x0, y0 = int(cx - bw/2), int(cy - bh/2)
+    for c in range(3):
+        y1, x1 = min(y0+bh, bg.shape[0]), min(x0+bw, bg.shape[1])
+        ys, xs = max(0,-y0), max(0,-x0)
+        y0c, x0c = max(0,y0), max(0,x0)
+        a = img[ys:ys+(y1-y0c), xs:xs+(x1-x0c), 3:4] / 255.0
+        bg[y0c:y1, x0c:x1, c] = (a[...,0]*img[ys:ys+(y1-y0c), xs:xs+(x1-x0c), c]
+                                 + (1-a[...,0])*bg[y0c:y1, x0c:x1, c])
+    return bg
+
 
 class FlowerProcessor(VideoProcessorBase):
     def __init__(self):
@@ -42,13 +66,27 @@ class FlowerProcessor(VideoProcessorBase):
         self.glow_amt = 14
         self.smooth = 0.3
         self.high = 1.45
+        self.fx = None
+        self.fy = None
+        self.follow = 0.25
+        self.lift = 1.3
+        self.crown = 0.12
+        self.face_every = 3
+        self.crown_at = None
+        face_opts = FaceLandmarkerOptions(
+            base_options=BaseOptions(model_asset_path='face_landmarker.task'),
+            running_mode=VisionRunningMode.IMAGE, num_faces=1)
+        try:
+            self.face = FaceLandmarker.create_from_options(face_opts)
+        except Exception:
+            self.face = None
+        self.tiara = cv2.imread('tiara.png', cv2.IMREAD_UNCHANGED)
 
     def recv(self, frame):
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
         h, w = img.shape[:2]
 
-        # dreamy soft-focus pass over the camera feed
         soft = cv2.resize(cv2.resize(img, (w // 4, h // 4)), (w, h))
         img = cv2.addWeighted(img, 0.78, soft, 0.22, 6)
 
@@ -59,11 +97,8 @@ class FlowerProcessor(VideoProcessorBase):
         self.frame_count += 1
 
         lm = result.hand_landmarks
+        hand_pos = None
         for i, hand in enumerate(lm):
-            for point in hand:
-                px, py = int(point.x * w), int(point.y * h)
-                cv2.circle(img, (px, py), 4, (255, 255, 255), -1, cv2.LINE_AA)
-                cv2.circle(img, (px, py), 3, (203, 130, 255), -1, cv2.LINE_AA)
             val = pinch_value(hand, self.high)
             label = result.handedness[i][0].category_name
             if label == "Left":
@@ -72,26 +107,54 @@ class FlowerProcessor(VideoProcessorBase):
             else:
                 label = "Left"
                 self.bloom = self.smooth * val + (1 - self.smooth) * self.bloom
+                hand_pos = (hand[9].x * w, hand[9].y * h)
             text = ("Grow" if label == "Right" else "Bloom") + " it <3"
             wx, wy = int(hand[0].x * w), int(hand[0].y * h)
             draw_pill(img, wx, wy, text)
 
-        cx, cy = w // 2, h // 2
+        if hand_pos is not None:
+            if self.fx is None:
+                self.fx, self.fy = hand_pos
+            else:
+                self.fx += (hand_pos[0] - self.fx) * self.follow
+                self.fy += (hand_pos[1] - self.fy) * self.follow
+
+        if self.fx is not None:
+            size = max(0.0, min(1.0, self.grow))
+            lift = min(w, h) * (0.09 + 0.20 * size) * self.lift
+            cx, cy = int(self.fx), int(self.fy - lift)
+        else:
+            cx, cy = w // 2, h // 2
         sway = math.sin(self.frame_count * 0.04) * 0.06
         draw_flower(layer, cx, cy, self.grow, self.bloom,
                     phase=sway, fc=self.frame_count)
 
-        # glow halo computed at half resolution to stay smooth at HD
         small = cv2.resize(layer, (w // 2, h // 2))
         glow = cv2.GaussianBlur(small, (0, 0), max(1, self.glow_amt // 2))
         glow = cv2.resize(glow, (w, h))
         img = cv2.addWeighted(img, 1.0, glow, 0.55, 0)
-        # composite the flower over the feed (not additive, so colours stay rich)
         b, g, r = cv2.split(layer)
         mask = cv2.max(cv2.max(b, g), r)
-        alpha = cv2.multiply(mask, np.array([4.25]))  # saturates at 255 = opaque
+        alpha = cv2.multiply(mask, np.array([4.25]))
         alpha = alpha.astype(np.float32) * (1.0 / 255.0)
         img = cv2.blendLinear(img, layer, 1.0 - alpha, alpha)
+
+        if self.tiara is not None and self.face is not None:
+            if self.frame_count % self.face_every == 0:
+                self.crown_at = None
+                for face in self.face.detect(mp_image).face_landmarks:
+                    chin = face[152]
+                    forehead = face[10]
+                    L, R = face[234], face[454]
+                    ux = (forehead.x - chin.x) * w
+                    uy = (forehead.y - chin.y) * h
+                    ax = int(forehead.x * w + ux * self.crown)
+                    ay = int(forehead.y * h + uy * self.crown)
+                    width = math.hypot((R.x - L.x) * w, (R.y - L.y) * h) * 1.2
+                    angle = math.degrees(math.atan2((R.y - L.y) * h, (R.x - L.x) * w))
+                    self.crown_at = (ax, ay, int(width), angle)
+            if self.crown_at is not None:
+                overlay_png(img, self.tiara, *self.crown_at)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
@@ -197,7 +260,6 @@ st.markdown(
         color: #a25c86;
     }
 
-    /* the webrtc component (iframe) — big, rounded stage */
     .stApp iframe {
         border-radius: 28px;
         display: block;
@@ -230,7 +292,6 @@ st.markdown(
     }
     .stButton>button:hover { transform: translateY(-2px) scale(1.03); }
 
-    /* floating petals & hearts */
     .fl {
         position: fixed;
         bottom: -60px;
@@ -250,7 +311,6 @@ st.markdown(
 
     #MainMenu, footer { visibility: hidden; }
 
-    /* phone-friendly sizing */
     @media (max-width: 640px) {
         .block-container { padding-top: 0.6rem; }
         .bloom-title { font-size: 2.1rem; }
@@ -302,10 +362,15 @@ st.markdown(
             <div class="chip">
                 <span class="big">🌷</span>
                 <b>Left hand</b><br>
-                pinch &amp; open to make it <b>bloom</b>
+                hold the stem, pinch to make it <b>bloom</b>
+            </div>
+            <div class="chip">
+                <span class="big">👑</span>
+                <b>Your head</b><br>
+                a tiara appears <b>all by itself</b>
             </div>
         </div>
-        <div class="hint">press <b>START</b> below, allow the camera, and show both hands ✨</div>
+        <div class="hint">press <b>START</b> below, allow the camera, then show both hands ✨</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -317,6 +382,9 @@ with st.sidebar:
     glow = st.slider("glow ✨", 1, 40, 14)
     smooth = st.slider("smoothness 🌊", 0.0, 1.0, 0.3)
     high = st.slider("sensitivity 🤏", 0.5, 3.0, 1.45)
+    follow = st.slider("follow speed 🤲", 0.05, 0.6, 0.25)
+    lift = st.slider("stem length 🌿", 0.5, 2.5, 1.3)
+    crown = st.slider("tiara height 👑", -0.3, 0.8, 0.12)
 
 def _cred(name):
     """Read a credential from the environment or Streamlit secrets."""
@@ -329,7 +397,6 @@ def _cred(name):
         return None
 
 
-# Cache the Twilio TURN token (Twilio's default TTL is 24h; refetch hourly).
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_ice_servers():
     """ICE servers for the WebRTC connection.
@@ -347,7 +414,7 @@ def get_ice_servers():
         from twilio.rest import Client
         token = Client(account_sid, auth_token).tokens.create()
         return token.ice_servers
-    except Exception as e:  # network error, bad creds, etc. — degrade gracefully
+    except Exception as e:
         st.warning(f"Couldn't fetch Twilio TURN servers; using STUN only ({e}).")
         return stun_only
 
@@ -372,18 +439,12 @@ with st.sidebar.expander("🔧 connection debug"):
     st.caption("URLs (secrets hidden):")
     st.code("\n".join(u for u in _urls if u) or "(none)")
 
-# Both peers sit behind NAT on hosted deployments (Hugging Face Spaces), so the
-# TURN relay must be configured for the server AND the browser — configuring only
-# one side leaves the other offering unreachable candidates and the connection
-# never completes.
 ctx = webrtc_streamer(
     key="flower",
     video_processor_factory=FlowerProcessor,
     server_rtc_configuration={"iceServers": ice_servers},
     frontend_rtc_configuration={"iceServers": ice_servers},
     media_stream_constraints={
-        # facingMode "user" opens the front/selfie camera on phones, which suits
-        # a hand-mirror app (the feed is mirror-flipped in recv).
         "video": {
             "facingMode": "user",
             "width": {"ideal": 1280},
@@ -395,7 +456,7 @@ ctx = webrtc_streamer(
         autoPlay=True,
         controls=False,
         muted=True,
-        playsInline=True,  # iOS Safari: play inline instead of forcing fullscreen
+        playsInline=True,
         style={
             "width": "100%",
             "borderRadius": "26px",
@@ -409,6 +470,9 @@ if ctx.video_processor:
     ctx.video_processor.glow_amt = glow
     ctx.video_processor.smooth = smooth
     ctx.video_processor.high = high
+    ctx.video_processor.follow = follow
+    ctx.video_processor.lift = lift
+    ctx.video_processor.crown = crown
 
 st.markdown(
     '<div class="bloom-foot">made with <span class="beat">💖</span> just for you</div>',

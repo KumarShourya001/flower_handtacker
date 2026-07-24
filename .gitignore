@@ -18,9 +18,11 @@ flower.py
 .DS_Store
 Thumbs.db
 
-# Streamlit
+# Secrets
 .streamlit/secrets.toml
 .hf_token
+.env
+.env.*
 
 # stray clone of the Space
 hand-flower/
