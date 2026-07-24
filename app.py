@@ -347,7 +347,7 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="bloom-sub">a little flower that grows with your hands 💕</div>',
+    '<div class="bloom-sub">a  flower for you 💕</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
