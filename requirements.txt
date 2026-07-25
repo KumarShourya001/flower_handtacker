@@ -1,8 +1,9 @@
+# headless: the Space has no display, and the GUI build pulls in GTK/Qt for nothing
 opencv-python-headless==5.0.0.93
-mediapipe==0.10.35
+mediapipe==0.10.35          # hand + face landmarkers (see the .task files)
 numpy==2.2.6
-av==16.1.0
-streamlit==1.58.0
+av==16.1.0                  # frames in and out of the WebRTC stream
+streamlit==1.58.0           # keep in step with sdk_version in README.md
 streamlit-webrtc==0.74.2
-aioice>=0.9.0
-twilio>=9.0.0
+aioice>=0.9.0               # older pins stall ICE gathering behind NAT
+twilio>=9.0.0               # optional: TURN relay, only used if credentials are set

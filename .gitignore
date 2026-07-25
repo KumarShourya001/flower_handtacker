@@ -12,11 +12,16 @@ env/
 # Local desktop-only version (not used by the Space)
 flower.py
 
+# Stills rendered while tuning the flower
+preview*.png
+render*.png
+
 # IDE / OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+*.log
 
 # Secrets
 .streamlit/secrets.toml

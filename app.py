@@ -7,7 +7,18 @@ import av
 import random
 import streamlit as st
 from streamlit_webrtc import webrtc_streamer, VideoProcessorBase, VideoHTMLAttributes
-from bloom import draw_flower, draw_pill
+from bloom import Drifting, draw_flower, draw_note, draw_pill
+
+# ---- the personal bits. change these and the whole thing is yours ------------
+TO = "Nayana"  # a name for the birthday line, e.g. "Aditi"
+CARD = "Something Beautiful,For you beautiful"
+NOTES = [
+    "you make ordinary days bloom",
+    "happy birthday, you",
+    "i would grow this for you again tomorrow",
+    "hold it a little longer",
+]
+# -----------------------------------------------------------------------------
 
 BaseOptions = mp.tasks.BaseOptions
 HandLandmarker = mp.tasks.vision.HandLandmarker
@@ -16,6 +27,10 @@ VisionRunningMode = mp.tasks.vision.RunningMode
 
 FaceLandmarker = mp.tasks.vision.FaceLandmarker
 FaceLandmarkerOptions = mp.tasks.vision.FaceLandmarkerOptions
+
+NOTE_FRAMES = 210  # how long one line of handwriting stays before the next
+
+
 def pinch_value(hand, high):
     thumb = hand[4]
     index = hand[8]
@@ -30,7 +45,10 @@ def pinch_value(hand, high):
     normalized = max(0.0, min(1.0, normalized))
     return normalized
 
-def overlay_png(bg, png, cx, cy, width, angle_deg):
+
+def overlay_png(bg, png, cx, cy, width, angle_deg, alpha=1.0):
+    if png is None or png.shape[2] < 4 or width < 2 or alpha <= 0.01:
+        return bg
     oh, ow = png.shape[:2]
     scale = width / ow
     img = cv2.resize(png, (max(1, int(ow*scale)), max(1, int(oh*scale))),
@@ -43,15 +61,46 @@ def overlay_png(bg, png, cx, cy, width, angle_deg):
     M[1,2] += bh/2 - nh/2
     img = cv2.warpAffine(img, M, (bw, bh), flags=cv2.INTER_LINEAR,
                          borderValue=(0,0,0,0))
+
     x0, y0 = int(cx - bw/2), int(cy - bh/2)
-    for c in range(3):
-        y1, x1 = min(y0+bh, bg.shape[0]), min(x0+bw, bg.shape[1])
-        ys, xs = max(0,-y0), max(0,-x0)
-        y0c, x0c = max(0,y0), max(0,x0)
-        a = img[ys:ys+(y1-y0c), xs:xs+(x1-x0c), 3:4] / 255.0
-        bg[y0c:y1, x0c:x1, c] = (a[...,0]*img[ys:ys+(y1-y0c), xs:xs+(x1-x0c), c]
-                                 + (1-a[...,0])*bg[y0c:y1, x0c:x1, c])
+    px0, py0 = max(0, x0), max(0, y0)
+    px1, py1 = min(bg.shape[1], x0 + bw), min(bg.shape[0], y0 + bh)
+    if px1 <= px0 or py1 <= py0:  # tiara has wandered off the edge of the frame
+        return bg
+    src = img[py0-y0:py1-y0, px0-x0:px1-x0]
+    a = src[..., 3:4].astype(np.float32) * (alpha / 255.0)
+    roi = bg[py0:py1, px0:px1]
+    roi[:] = (a * src[..., :3] + (1 - a) * roi).astype(np.uint8)
     return bg
+
+
+_vig_cache = {}
+
+
+def vignette(h, w):
+    """Soft darkening at the corners so the middle of the frame feels lit."""
+    key = (h, w)
+    if key not in _vig_cache:
+        ys = np.linspace(-1, 1, h, dtype=np.float32)[:, None]
+        xs = np.linspace(-1, 1, w, dtype=np.float32)[None, :]
+        r = np.sqrt(xs * xs * 0.85 + ys * ys)
+        v = 1.0 - 0.42 * np.clip(r - 0.35, 0, None) ** 1.7
+        v = np.clip(v, 0.35, 1.0)
+        _vig_cache[key] = cv2.merge([v, v, v])
+    return _vig_cache[key]
+
+
+def _grade_table():
+    """A gentle film curve: shadows lifted a touch rosy, highlights rolled off."""
+    x = np.linspace(0, 1, 256)
+    s = np.clip(x ** 0.96 + 0.05 * np.sin(np.pi * x), 0, 1)
+    b = np.clip(s * 0.99 + 0.015, 0, 1)
+    g = np.clip(s * 0.98 + 0.008, 0, 1)
+    r = np.clip(s * 1.02 + 0.022, 0, 1)
+    return (np.stack([b, g, r], axis=1) * 255).astype(np.uint8).reshape(1, 256, 3)
+
+
+GRADE = _grade_table()
 
 
 class FlowerProcessor(VideoProcessorBase):
@@ -68,11 +117,21 @@ class FlowerProcessor(VideoProcessorBase):
         self.high = 1.45
         self.fx = None
         self.fy = None
+        self.tilt = 0.0
+        self.lost = 0
+        self.met = False
         self.follow = 0.25
         self.lift = 1.3
         self.crown = 0.12
         self.face_every = 3
         self.crown_at = None
+        self.crown_now = None
+        self.crown_fade = 0.0
+        self.drift = Drifting()
+        self.note_i = 0
+        self.note_clock = 0
+        self.note_level = 0.0
+        self.hint_level = 0.0
         face_opts = FaceLandmarkerOptions(
             base_options=BaseOptions(model_asset_path='face_landmarker.task'),
             running_mode=VisionRunningMode.IMAGE, num_faces=1)
@@ -86,18 +145,21 @@ class FlowerProcessor(VideoProcessorBase):
         img = frame.to_ndarray(format="bgr24")
         img = cv2.flip(img, 1)
         h, w = img.shape[:2]
+        self.frame_count += 1
 
-        soft = cv2.resize(cv2.resize(img, (w // 4, h // 4)), (w, h))
-        img = cv2.addWeighted(img, 0.78, soft, 0.22, 6)
-
-        layer = np.zeros_like(img)
+        # look for hands on the sharp frame, then prettify it afterwards —
+        # tracking off the soft-focus version costs accuracy for nothing
         rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
         mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
         result = self.landmarker.detect(mp_image)
-        self.frame_count += 1
+
+        soft = cv2.resize(cv2.resize(img, (w // 4, h // 4)), (w, h))
+        img = cv2.addWeighted(img, 0.78, soft, 0.22, 6)
+        layer = np.zeros_like(img)
 
         lm = result.hand_landmarks
         hand_pos = None
+        holding = None
         for i, hand in enumerate(lm):
             val = pinch_value(hand, self.high)
             label = result.handedness[i][0].category_name
@@ -108,9 +170,14 @@ class FlowerProcessor(VideoProcessorBase):
                 label = "Left"
                 self.bloom = self.smooth * val + (1 - self.smooth) * self.bloom
                 hand_pos = (hand[9].x * w, hand[9].y * h)
-            text = ("Grow" if label == "Right" else "Bloom") + " it <3"
+                holding = hand
+            text = ("grow" if label == "Right" else "bloom") + " it <3"
             wx, wy = int(hand[0].x * w), int(hand[0].y * h)
             draw_pill(img, wx, wy, text)
+
+        if lm:
+            self.met = True
+        self.lost = 0 if hand_pos is not None else self.lost + 1
 
         if hand_pos is not None:
             if self.fx is None:
@@ -118,16 +185,36 @@ class FlowerProcessor(VideoProcessorBase):
             else:
                 self.fx += (hand_pos[0] - self.fx) * self.follow
                 self.fy += (hand_pos[1] - self.fy) * self.follow
+        elif self.fx is not None and self.lost > 45:
+            # nobody holding it any more: let it wander back to the middle
+            # instead of hanging in a corner
+            self.fx += (w * 0.5 - self.fx) * 0.02
+            self.fy += (h * 0.62 - self.fy) * 0.02
+            self.tilt *= 0.96
 
+        if holding is not None:
+            # the stem should lean the way the palm is pointing, so it reads as
+            # something held rather than something floating above a hand
+            aim = math.atan2((holding[9].y - holding[0].y) * h,
+                             (holding[9].x - holding[0].x) * w)
+            off = ((aim + math.pi / 2 + math.pi) % (2 * math.pi)) - math.pi
+            off = max(-0.55, min(0.55, off))
+            self.tilt += (off - self.tilt) * 0.12
+
+        root = None
         if self.fx is not None:
             size = max(0.0, min(1.0, self.grow))
-            lift = min(w, h) * (0.09 + 0.20 * size) * self.lift
-            cx, cy = int(self.fx), int(self.fy - lift)
+            reach = min(w, h) * (0.09 + 0.20 * size) * self.lift
+            a = -math.pi / 2 + self.tilt
+            cx = int(self.fx + math.cos(a) * reach)
+            cy = int(self.fy + math.sin(a) * reach)
+            if self.lost < 90:
+                root = (int(self.fx), int(self.fy))
         else:
             cx, cy = w // 2, h // 2
         sway = math.sin(self.frame_count * 0.04) * 0.06
-        draw_flower(layer, cx, cy, self.grow, self.bloom,
-                    phase=sway, fc=self.frame_count)
+        draw_flower(layer, cx, cy, self.grow, self.bloom, phase=sway,
+                    fc=self.frame_count, root=root, drift=self.drift)
 
         small = cv2.resize(layer, (w // 2, h // 2))
         glow = cv2.GaussianBlur(small, (0, 0), max(1, self.glow_amt // 2))
@@ -148,18 +235,54 @@ class FlowerProcessor(VideoProcessorBase):
                     L, R = face[234], face[454]
                     ux = (forehead.x - chin.x) * w
                     uy = (forehead.y - chin.y) * h
-                    ax = int(forehead.x * w + ux * self.crown)
-                    ay = int(forehead.y * h + uy * self.crown)
+                    ax = forehead.x * w + ux * self.crown
+                    ay = forehead.y * h + uy * self.crown
                     width = math.hypot((R.x - L.x) * w, (R.y - L.y) * h) * 1.2
                     angle = math.degrees(math.atan2((R.y - L.y) * h, (R.x - L.x) * w))
-                    self.crown_at = (ax, ay, int(width), angle)
+                    self.crown_at = (ax, ay, width, angle)
+            # glide between the (thrifty) face reads and fade in and out, so the
+            # crown never snaps or blinks
             if self.crown_at is not None:
-                overlay_png(img, self.tiara, *self.crown_at)
+                if self.crown_now is None:
+                    self.crown_now = list(self.crown_at)
+                else:
+                    for i in range(4):
+                        self.crown_now[i] += (self.crown_at[i] - self.crown_now[i]) * 0.35
+                self.crown_fade = min(1.0, self.crown_fade + 0.12)
+            else:
+                self.crown_fade = max(0.0, self.crown_fade - 0.06)
+            if self.crown_now is not None and self.crown_fade > 0.01:
+                x, y, cw, ang = self.crown_now
+                overlay_png(img, self.tiara, int(x), int(y), int(cw), ang,
+                            alpha=self.crown_fade)
+
+        img = cv2.multiply(img, vignette(h, w), dtype=cv2.CV_8U)
+        img = cv2.LUT(img, GRADE)
+
+        # a line of handwriting once it is properly open, and a nudge for anyone
+        # who has not worked out what to do with their hands yet
+        wide = bool(NOTES) and self.bloom > 0.72 and self.grow > 0.45
+        self.note_level += ((1.0 if wide else 0.0) - self.note_level) * 0.06
+        if wide:
+            self.note_clock += 1
+            if self.note_clock >= NOTE_FRAMES:
+                self.note_clock = 0
+                self.note_i = (self.note_i + 1) % len(NOTES)
+        if wide or (NOTES and self.note_level > 0.01):
+            t = self.note_clock / NOTE_FRAMES
+            env = max(0.0, min(1.0, t / 0.12, (1.0 - t) / 0.12))
+            draw_note(img, NOTES[self.note_i], alpha=self.note_level * env)
+        else:
+            want = 1.0 if (not self.met and self.frame_count > 40) else 0.0
+            self.hint_level += (want - self.hint_level) * 0.05
+            if self.hint_level > 0.02:
+                draw_note(img, "show me both hands", alpha=self.hint_level)
 
         return av.VideoFrame.from_ndarray(img, format="bgr24")
 
 
-st.set_page_config(page_title="Bloom for You", page_icon="🌸", layout="wide")
+st.set_page_config(page_title="Bloom for You", page_icon="🌸", layout="wide",
+                   initial_sidebar_state="collapsed")
 
 st.markdown(
     """
@@ -266,9 +389,19 @@ st.markdown(
         margin: 0 auto;
     }
 
+    .bloom-card-note {
+        text-align: center;
+        font-family: 'Pacifico', cursive;
+        font-size: 1.35rem;
+        color: #b0559a !important;
+        margin: 1.6rem auto 0 auto;
+        max-width: 30rem;
+        line-height: 1.6;
+        opacity: 0.95;
+    }
     .bloom-foot {
         text-align: center;
-        margin-top: 1.5rem;
+        margin-top: 0.5rem;
         font-size: 1rem;
         color: #b06a92 !important;
     }
@@ -309,7 +442,8 @@ st.markdown(
         100% { transform: translateY(-108vh) rotate(320deg); opacity: 0; }
     }
 
-    #MainMenu, footer { visibility: hidden; }
+    #MainMenu, footer, [data-testid="stToolbar"], [data-testid="stDecoration"],
+    [data-testid="stStatusWidget"] { visibility: hidden; }
 
     @media (max-width: 640px) {
         .block-container { padding-top: 0.6rem; }
@@ -322,6 +456,12 @@ st.markdown(
         .chip .big { font-size: 1.5rem; }
         .hint { font-size: 0.85rem; }
         .stApp iframe { border-radius: 18px; }
+        .bloom-card-note { font-size: 1.1rem; }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+        .stApp, .bloom-title .t-grad, .bloom-hb, .bloom-foot .beat { animation: none !important; }
+        .fl { display: none; }
     }
     </style>
     """,
@@ -343,11 +483,11 @@ st.markdown(
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="bloom-hb">🎂 Happy Birthday 🎉</div>',
+    f'<div class="bloom-hb">🎂 Happy Birthday{", " + TO if TO else ""} 🎉</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
-    '<div class="bloom-sub">a flower for you 💕</div>',
+    '<div class="bloom-sub">a flower that only grows for you 💕</div>',
     unsafe_allow_html=True,
 )
 st.markdown(
@@ -357,7 +497,7 @@ st.markdown(
             <div class="chip">
                 <span class="big">🌱</span>
                 <b>Right hand</b><br>
-                pinch &amp; open to make it <b>grow</b>
+                pinch, then open — watch it <b>grow</b>
             </div>
             <div class="chip">
                 <span class="big">🌷</span>
@@ -367,10 +507,10 @@ st.markdown(
             <div class="chip">
                 <span class="big">👑</span>
                 <b>Your head</b><br>
-                a tiara appears <b>all by itself</b>
+                the tiara finds you <b>on its own</b>
             </div>
         </div>
-        <div class="hint">press <b>START</b> below, allow the camera, then show both hands ✨</div>
+        <div class="hint">press <b>START</b>, say yes to the camera, then hold up both hands ✨</div>
     </div>
     """,
     unsafe_allow_html=True,
@@ -430,14 +570,16 @@ def _ice_urls(servers):
     return urls
 
 
-with st.sidebar.expander("🔧 connection debug"):
-    _urls = _ice_urls(ice_servers)
-    _turn = any("turn:" in (u or "") for u in _urls)
-    st.write(f"SID set: **{bool(_cred('TWILIO_ACCOUNT_SID'))}**")
-    st.write(f"Token set: **{bool(_cred('TWILIO_AUTH_TOKEN'))}**")
-    st.write(f"TURN relay active: **{_turn}**")
-    st.caption("URLs (secrets hidden):")
-    st.code("\n".join(u for u in _urls if u) or "(none)")
+# kept out of the way of the gift; set BLOOM_DEBUG=1 when a camera won't connect
+if os.environ.get("BLOOM_DEBUG"):
+    with st.sidebar.expander("🔧 connection debug"):
+        _urls = _ice_urls(ice_servers)
+        _turn = any("turn:" in (u or "") for u in _urls)
+        st.write(f"SID set: **{bool(_cred('TWILIO_ACCOUNT_SID'))}**")
+        st.write(f"Token set: **{bool(_cred('TWILIO_AUTH_TOKEN'))}**")
+        st.write(f"TURN relay active: **{_turn}**")
+        st.caption("URLs (secrets hidden):")
+        st.code("\n".join(u for u in _urls if u) or "(none)")
 
 ctx = webrtc_streamer(
     key="flower",
@@ -474,6 +616,8 @@ if ctx.video_processor:
     ctx.video_processor.lift = lift
     ctx.video_processor.crown = crown
 
+if CARD:
+    st.markdown(f'<div class="bloom-card-note">{CARD}</div>', unsafe_allow_html=True)
 st.markdown(
     '<div class="bloom-foot">made with <span class="beat">💖</span> just for you</div>',
     unsafe_allow_html=True,
