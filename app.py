@@ -117,7 +117,6 @@ class FlowerProcessor(VideoProcessorBase):
         self.high = 1.45
         self.fx = None
         self.fy = None
-        self.tilt = 0.0
         self.lost = 0
         self.met = False
         self.follow = 0.25
@@ -159,7 +158,6 @@ class FlowerProcessor(VideoProcessorBase):
 
         lm = result.hand_landmarks
         hand_pos = None
-        holding = None
         for i, hand in enumerate(lm):
             val = pinch_value(hand, self.high)
             label = result.handedness[i][0].category_name
@@ -170,7 +168,6 @@ class FlowerProcessor(VideoProcessorBase):
                 label = "Left"
                 self.bloom = self.smooth * val + (1 - self.smooth) * self.bloom
                 hand_pos = (hand[9].x * w, hand[9].y * h)
-                holding = hand
             text = ("grow" if label == "Right" else "bloom") + " it <3"
             wx, wy = int(hand[0].x * w), int(hand[0].y * h)
             draw_pill(img, wx, wy, text)
@@ -190,24 +187,12 @@ class FlowerProcessor(VideoProcessorBase):
             # instead of hanging in a corner
             self.fx += (w * 0.5 - self.fx) * 0.02
             self.fy += (h * 0.62 - self.fy) * 0.02
-            self.tilt *= 0.96
-
-        if holding is not None:
-            # the stem should lean the way the palm is pointing, so it reads as
-            # something held rather than something floating above a hand
-            aim = math.atan2((holding[9].y - holding[0].y) * h,
-                             (holding[9].x - holding[0].x) * w)
-            off = ((aim + math.pi / 2 + math.pi) % (2 * math.pi)) - math.pi
-            off = max(-0.55, min(0.55, off))
-            self.tilt += (off - self.tilt) * 0.12
 
         root = None
         if self.fx is not None:
             size = max(0.0, min(1.0, self.grow))
-            reach = min(w, h) * (0.09 + 0.20 * size) * self.lift
-            a = -math.pi / 2 + self.tilt
-            cx = int(self.fx + math.cos(a) * reach)
-            cy = int(self.fy + math.sin(a) * reach)
+            lift = min(w, h) * (0.09 + 0.20 * size) * self.lift
+            cx, cy = int(self.fx), int(self.fy - lift)
             if self.lost < 90:
                 root = (int(self.fx), int(self.fy))
         else:
